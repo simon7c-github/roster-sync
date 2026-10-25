@@ -1,0 +1,11 @@
+{
+  "name": "Roster Sync",
+  "short_name": "Roster",
+  "description": "Qantas WebCIS roster viewer with change tracking and Google Calendar sync",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#f2f4f8",
+  "theme_color": "#1d4ed8",
+  "icons": [{ "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }]
+}

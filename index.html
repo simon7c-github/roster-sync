@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Roster Sync</title>
+<meta name="theme-color" content="#1d4ed8">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Roster">
+<meta name="referrer" content="no-referrer">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="icon.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Condensed:wght@600;700&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="app.css">
+<style>:root{padding-top:env(safe-area-inset-top,0px)} body{margin:0} [hidden]{display:none!important}</style>
+</head>
+<body>
+<div class="app">
+  <header class="top">
+    <div class="top-row">
+      <div class="brand">
+        <svg width="30" height="30" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="var(--accent)"/><path d="M7 21.5 25 11M16 16.3l-3.2-6.8 2-.9 5.6 5.4M16 16.3l1.6 6.6-1.9.6-4.3-5.2" stroke="var(--accent-ink)" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <div style="min-width:0"><h1>Roster Sync</h1><div class="crew" id="crew"></div></div>
+      </div>
+      <div class="top-spacer"></div>
+      <span class="pill" id="status"><span class="dot"></span>Loading</span>
+    </div>
+    <nav class="tabs" id="tabs" role="tablist" aria-label="Sections"></nav>
+  </header>
+  <main id="view" aria-live="polite"></main>
+  <div class="toast" id="toast" role="status" hidden></div>
+</div>
+
+<script>
+  /* Optional: paste your Google OAuth client ID here so every device picks it up
+     (it is not a secret). You can also enter it in Settings on each device. */
+  window.ROSTER_CONFIG = { mode: 'hosted', clientId: '' };
+</script>
+<script src="core.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
