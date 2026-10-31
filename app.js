@@ -8,16 +8,38 @@
   const $ = (s, el = document) => el.querySelector(s);
   const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const MON = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  const todayIso = () => { const d = new Date(); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const BASE_OFF = 480; // SIN home base, UTC+8 (no daylight saving)
+  // "Today" on the roster is the home-base (SIN) date, because WebCIS roster days are SIN dates.
+  const todayIso = (off) => C.dateAt(Date.now(), off == null ? BASE_OFF : off);
   const fmtDate = (iso, opt) => { const [y, m, d] = iso.split('-').map(Number); const w = C.DOW_NAMES[C.dowOf(iso)]; return opt === 'long' ? `${w} ${d} ${MON[m - 1]} ${y}` : `${w} ${d} ${MON[m - 1]}`; };
   const fmtExport = (s) => { const [d, t] = s.split('T'); const [y, m, dd] = d.split('-').map(Number); return `${dd} ${MON[m - 1]} ${y} ${t}`; };
   const tzShort = (() => { try { return new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date()).find((p) => p.type === 'timeZoneName').value; } catch (e) { return ''; } })();
   const devFmt = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
   const devTime = new Intl.DateTimeFormat(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  const devDay = new Intl.DateTimeFormat(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
+  const devOff = (ms) => -new Date(ms).getTimezoneOffset();
+  const devZone = (ms) => { try { return new Intl.DateTimeFormat(undefined, { timeZoneName: 'short' }).formatToParts(new Date(ms)).find((x) => x.type === 'timeZoneName').value; } catch (e) { return ''; } };
+  const onBase = (ms, off) => devOff(ms) === (off == null ? BASE_OFF : off);
+  const hm = (ms) => devTime.format(ms);
+  // One instant: device time first; port-local and SIN time added only when they differ from it.
+  function when(ms, portOff, port, baseOff, base, withDay) {
+    const main = `${withDay ? devDay.format(ms) + ' ' : ''}${hm(ms)}`;
+    const alt = [];
+    if (port && portOff !== devOff(ms)) alt.push(`${C.clockAt(ms, portOff)} ${port} local`);
+    if (base && port !== base && baseOff !== devOff(ms)) alt.push(`${C.clockAt(ms, baseOff)} ${base}`);
+    return `${esc(main)}${alt.length ? ` <small class="alt">${esc(alt.join(' · '))}</small>` : ''}`;
+  }
+  const money = (cur, n) => `${cur} ${Number(n || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const fc = C.fmtClock;
 
   /* ---------- settings (localStorage, best effort) ---------- */
-  const DEFAULTS = { clientId: CFG.clientId || '', folder: '', months: 12, reminder: 120, calName: 'Qantas Roster', calId: '', staff: '', lastDrive: '' };
+  const DEFAULTS = { clientId: CFG.clientId || '', folder: '', months: 12, reminder: 120, calName: 'Qantas Roster', calId: '', staff: '', lastDrive: '',
+    mealRate: 50, mealCurrency: 'AUD', portRates: '', fx: '', miscSGD: 50, transportSGD: 25, mealsProvided: {} };
+  const allowCfg = () => ({
+    mealRate: Number(settings.mealRate) || 0, mealCurrency: (settings.mealCurrency || 'AUD').toUpperCase(), fx: Number(settings.fx) || null,
+    miscSGD: Number(settings.miscSGD) || 0, transportSGD: Number(settings.transportSGD) || 0, mealsProvided: settings.mealsProvided || {},
+    portRates: Object.fromEntries(String(settings.portRates || '').split(/[,;\n]/).map((x) => x.split('=').map((y) => y.trim())).filter(([k, v]) => /^[A-Za-z]{3}$/.test(k || '') && v !== '' && !isNaN(Number(v))).map(([k, v]) => [k.toUpperCase(), Number(v)])),
+  });
   const settings = Object.assign({}, DEFAULTS, (() => { try { return JSON.parse(localStorage.getItem('rq.settings') || '{}'); } catch (e) { return {}; } })());
   const saveSettings = () => { try { localStorage.setItem('rq.settings', JSON.stringify(settings)); } catch (e) { /* storage blocked */ } };
 
@@ -198,6 +220,7 @@
     changes: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 7h13l-3-3M20 17H7l3 3"/></svg>',
     history: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>',
     sync: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M20 12a8 8 0 0 1-14 5.3M4 12a8 8 0 0 1 14-5.3M18 3v4h-4M6 21v-4h4"/></svg>',
+    pay: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="6" width="20" height="13" rx="2"/><path d="M2 10h20M16 15h2"/></svg>',
     settings: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>',
   };
   const TAG_TEXT = { added: 'Added', removed: 'Removed', changed: 'Changed', retimed: 'Retimed', renamed: 'Renamed' };
@@ -211,11 +234,11 @@
     if (PREVIEW) { pill.className = 'pill warn'; pill.innerHTML = '<span class="dot"></span>Preview · sample exports'; }
     else if (S.token) { pill.className = 'pill ok'; pill.innerHTML = '<span class="dot"></span>Google connected'; }
     else { pill.className = 'pill'; pill.innerHTML = '<span class="dot"></span>Not connected'; }
-    $('#tabs').innerHTML = [['roster', 'Roster'], ['changes', 'Changes'], ['history', 'History'], ['sync', 'Sync'], ['settings', 'Settings']].map(([v, l]) => {
+    $('#tabs').innerHTML = [['roster', 'Roster'], ['changes', 'Changes'], ['history', 'History'], ['pay', 'Allowances'], ['sync', 'Sync'], ['settings', 'Settings']].map(([v, l]) => {
       const n = v === 'changes' && latestDiff ? latestDiff.trips.length + latestDiff.header.length : 0;
       return `<button role="tab" data-view="${v}" aria-selected="${S.view === v}">${ICONS[v]}<span>${l}</span>${n ? `<span class="count">${n}</span>` : ''}</button>`;
     }).join('');
-    const views = { roster: viewRoster, changes: viewChanges, history: viewHistory, sync: viewSync, settings: viewSettings };
+    const views = { roster: viewRoster, changes: viewChanges, history: viewHistory, pay: viewPay, sync: viewSync, settings: viewSettings };
     $('#view').innerHTML = views[S.view]();
   }
   function renderProgress() { const b = $('#prog i'); if (b && S.plan && S.plan.total) b.style.width = `${(100 * S.progress) / S.plan.total}%`; const t = $('#prog-label'); if (t) t.textContent = S.busy; }
@@ -225,99 +248,146 @@
       <p style="margin-top:14px"><button class="btn primary" data-view="sync">Go to Sync</button></p></div>`;
   }
 
-  function periodPicker(p, withExport) {
+  function periodPicker(p, withExport, withToday) {
     const opts = S.periods.map((x) => `<option value="${esc(key(x))}" ${key(x) === S.periodKey ? 'selected' : ''}>BP ${esc(x.bidPeriod)} · ${fmtDate(x.startDate)} – ${fmtDate(x.endDate)}</option>`).join('');
     const staff = S.staffList.length > 1 ? `<div class="field"><label class="label" for="pick-staff">Crew member</label><select id="pick-staff">${S.staffList.map((s) => `<option value="${esc(s.staffNo)}" ${s.staffNo === settings.staff ? 'selected' : ''}>${esc(s.name)} (${esc(s.staffNo)})</option>`).join('')}</select></div>` : '';
     const ex = withExport ? `<div class="field"><label class="label" for="pick-export">As of export</label><select id="pick-export">${p.exports.map((e, i) => `<option value="${i}" ${i === expIdx(p) ? 'selected' : ''}>${fmtExport(e.exportedAt)}${i === p.exports.length - 1 ? ' (latest)' : ''}</option>`).join('')}</select></div>` : '';
-    return `<div class="toolbar">${staff}<div class="field"><label class="label" for="pick-period">Bid period</label><select id="pick-period">${opts}</select></div>${ex}</div>`;
+    const td = withToday ? `<button class="btn today-btn" data-act="today"><span class="sw today"></span>Today</button>` : '';
+    return `<div class="toolbar">${staff}<div class="field"><label class="label" for="pick-period">Bid period</label><select id="pick-period">${opts}</select></div>${ex}${td}</div>`;
   }
 
+  const KIND_SUB = { available: 'Available', off: 'Day off', reserve: 'Reserve', leave: 'Leave', fail: 'Failed obligation', other: 'Unrecognised code', blank: '' };
   function dayView(r, d) {
     const t = d.tripIndex != null ? r.trips[d.tripIndex] : null;
-    const info = { kind: d.kind, code: d.code || '—', sub: '', sub2: '', pos: '' };
+    const info = { kind: d.kind, code: d.code || '—', sub: '', sub2: '', pos: '', line: '' };
     if (t) {
       const di = t.dayInfo.find((x) => x.date === d.date); const first = di.n === 1, last = di.n === di.of;
       info.pos = first && last ? 'trip-start trip-end' : first ? 'trip-start' : last ? 'trip-end' : 'trip-mid';
-      info.sub = first ? `Rpt ${fc(t.rept)}` : last ? `Off ${fc(t.end)}` : di.label;
+      info.sub = first ? `Rpt ${hm(t.reportMs)}` : last ? `Off ${hm(t.signOffMs)}` : di.label;
       info.mono = first || last; info.sub2 = first || last ? di.label : '';
-      info.line = `${t.sectors.filter((s) => s.depDate === d.date).map((s) => `${s.flight} ${s.from}→${s.to} ${fc(s.depLst)}`).join(', ') || di.label}`;
+      const deps = t.sectors.filter((s) => s.depDate === d.date);
+      info.line = deps.map((s) => `${s.flight} ${s.from}→${s.to} rpt ${hm(s.reportMs)}`).join(', ') || di.label;
+    } else if (d.kind === 'standby') {
+      info.sub = d.standby ? `${hm(d.standby.startMs)}–${hm(d.standby.endMs)}` : 'Standby'; info.mono = !!d.standby;
+      info.line = d.info.label + (d.standby && d.info.times === 'file' ? ` ${hm(d.standby.startMs)}–${hm(d.standby.endMs)}` : '');
     } else {
-      info.sub = { standby: 'Standby', rest: 'Rest day', rrr: 'Rest recovery', other: 'Unrecognised code', blank: '' }[d.kind] || '';
-      info.line = { standby: 'Standby', rest: 'Off duty – rest day', rrr: 'Roster rest recovery', other: 'Unrecognised duty code' }[d.kind] || '';
+      info.sub = KIND_SUB[d.kind] || '';
+      info.line = d.info ? d.info.label : d.kind === 'other' ? 'Unrecognised duty code' : '';
     }
+    if (d.reserve && d.code !== 'R-') info.sub2 = `Reserve ${d.reserve.n}/${d.reserve.of}`;
+    if (d.code === 'R-') { info.sub = 'Reserve 1/7'; info.sub2 = `to ${fmtDate(d.reserve.end)}`; info.line = `Reserve block ${fmtDate(d.reserve.start)} – ${fmtDate(d.reserve.end)}`; }
+    if (d.reserve) info.reserve = d.reserve.n === 1 ? 'res-start' : d.reserve.n === d.reserve.of ? 'res-end' : 'res-mid';
     return info;
+  }
+
+  function cellHtml(r, d, diff, today) {
+    const v = dayView(r, d), ch = diff && diff.days[d.date];
+    const was = ch && ch.was && ch.was !== d.code ? `<span class="was">${esc(ch.was)}</span>` : '';
+    const isToday = d.date === today;
+    return `<button class="cell k-${v.kind} ${v.pos} ${v.reserve || ''} ${ch ? 'chg chg-' + ch.type : ''} ${isToday ? 'is-today' : ''}" data-date="${d.date}" ${isToday ? 'id="today-cell"' : ''} aria-pressed="${d.date === S.date}" aria-label="${esc(fmtDate(d.date))}${isToday ? ' (today)' : ''} ${esc(v.code)} ${esc(v.line)}">
+      <span class="d"><span>${Number(d.date.slice(8))}${isToday ? ' <b class="today-tag">Today</b>' : ''}</span>${was}</span>
+      <span class="code">${esc(v.code)}</span><span class="sub ${v.mono ? 'mono' : ''}">${esc(v.sub)}</span>${v.sub2 ? `<span class="sub">${esc(v.sub2)}</span>` : ''}
+      ${ch ? tag(ch.type) : ''}</button>`;
+  }
+
+  function todayNote(p) {
+    const t = todayIso();
+    if (t >= p.startDate && t <= p.endDate) return '';
+    const other = S.periods.find((x) => t >= x.startDate && t <= x.endDate);
+    const where = t < p.startDate ? `before BP ${p.bidPeriod} (starts ${fmtDate(p.startDate)})` : `after BP ${p.bidPeriod} (ended ${fmtDate(p.endDate)})`;
+    return `<p class="today-note">Today, ${esc(fmtDate(t))}, is ${esc(where)}.${other ? ` <button class="btn small" data-act="today">Go to BP ${esc(other.bidPeriod)}</button>` : ' No loaded bid period covers today.'}</p>`;
+  }
+
+  function checksHtml(r) {
+    const bad = r.checks.filter((c) => !c.ok);
+    return `<details class="checks ${bad.length ? 'has-warn' : ''}" ${bad.length ? 'open' : ''}><summary><span class="label">Rule checks</span> ${bad.length ? `<span class="tag chg-removed">${bad.length} warning${bad.length > 1 ? 's' : ''}</span>` : `<span class="tag chg-added">All ${r.checks.length} passed</span>`}</summary>
+      <ul>${r.checks.map((c) => `<li class="${c.ok ? 'ok' : 'warn'}"><b>${esc(c.rule)}</b> ${esc(c.text)}</li>`).join('')}</ul>
+      <p class="note">Advisory only, based on planned times in the export and the corporate rostering document.</p></details>`;
   }
 
   function viewRoster() {
     const p = period(); if (!p) return banners() + emptyState();
     const i = expIdx(p), r = p.exports[i], diff = p.history[i].diff, prev = i ? p.exports[i - 1] : null;
-    const today = todayIso();
+    const today = todayIso(r.baseOff);
     if (!S.date || !r.days.some((d) => d.date === S.date)) {
       S.date = r.days.some((d) => d.date === today) ? today : (diff && Object.keys(diff.days).sort()[0]) || r.startDate;
     }
     const credit = r.trips.reduce((a, t) => a + (C.hhmmToMin(t.credit) || 0), 0);
     const hdrChange = (k) => diff && diff.header.find((h) => h.label.toLowerCase().startsWith(k));
     const stat = (label, val, ch) => `<div class="stat"><span class="label">${label}</span><b>${esc(val)}${ch ? `<span class="was">${esc(ch.from)}</span>` : ''}</b></div>`;
-    const counts = { trip: 0, standby: 0, rest: 0, rrr: 0 }; r.days.forEach((d) => { counts[d.kind] = (counts[d.kind] || 0) + 1; });
-    let html = banners() + periodPicker(p, true);
-    html += `<div class="stats">${stat('Dates', `${fmtDate(r.startDate)} – ${fmtDate(r.endDate)}`)}${stat('Planned', r.header.planned || '—', hdrChange('planned'))}${stat('Trip credit', C.minToHhmm(credit))}${stat('Trips', String(r.trips.length))}${stat('Standby days', String(counts.standby || 0))}${stat('Exported', fmtExport(r.exportedAt))}</div>`;
-    if (diff) html += `<p class="note" style="margin:-6px 0 12px">Dashed outlines show what changed since the ${esc(fmtExport(prev.exportedAt))} export.</p>`;
-    // grid
-    const lead = (C.dowOf(r.startDate) + 6) % 7;
-    let cells = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((w) => `<div class="dow">${w}</div>`).join('');
-    for (let k = 0; k < lead; k++) cells += '<div class="cell empty"></div>';
+    const counts = {}; r.days.forEach((d) => { counts[d.kind] = (counts[d.kind] || 0) + 1; });
+    let html = banners() + periodPicker(p, true, true);
+    html += `<div class="stats">${stat('Dates', `${fmtDate(r.startDate)} – ${fmtDate(r.endDate)}`)}${stat('Planned', r.header.planned || '—', hdrChange('planned'))}${stat('Trip credit', C.minToHhmm(credit))}${stat('Trips', String(r.trips.length))}${stat('Available days', String(counts.available || 0))}${stat('Standby duties', String(counts.standby || 0))}${stat('Days off', String(counts.off || 0))}${counts.leave ? stat('Leave days', String(counts.leave)) : ''}${stat('Exported', fmtExport(r.exportedAt))}</div>`;
+    html += todayNote(p);
+    html += checksHtml(r);
+    const z = devZone(Date.now());
+    html += `<p class="note tz-note">Times are in your device's time zone${z ? ` (${esc(z)})` : ''}.${onBase(Date.now(), r.baseOff) ? '' : ` Roster days are ${esc(r.base)} dates; ${esc(r.base)} times are shown alongside in flight details.`}${diff ? ` Dashed outlines show what changed since the ${esc(fmtExport(prev.exportedAt))} export.` : ''}</p>`;
+    // grid: one block per calendar month
+    const months = []; r.days.forEach((d) => { const m = d.date.slice(0, 7); if (!months.length || months[months.length - 1].m !== m) months.push({ m, days: [] }); months[months.length - 1].days.push(d); });
+    const dows = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((w) => `<div class="dow">${w}</div>`).join('');
+    const grid = months.map(({ m, days }) => {
+      const [y, mo] = m.split('-').map(Number);
+      let cells = dows; const lead = (C.dowOf(days[0].date) + 6) % 7;
+      for (let k = 0; k < lead; k++) cells += '<div class="cell empty" aria-hidden="true"></div>';
+      days.forEach((d) => { cells += cellHtml(r, d, diff, today); });
+      return `<section class="month"><h3 class="month-h">${MONTH_LONG[mo - 1]} <span>${y}</span></h3><div class="grid">${cells}</div></section>`;
+    }).join('');
+    // agenda (phones): month heading, then weeks
+    let ag = '', wk = null, mon = null;
     r.days.forEach((d) => {
-      const v = dayView(r, d), ch = diff && diff.days[d.date];
-      const was = ch && ch.was && ch.was !== d.code ? `<span class="was">${esc(ch.was)}</span>` : '';
-      cells += `<button class="cell k-${v.kind} ${v.pos} ${ch ? 'chg chg-' + ch.type : ''} ${d.date === today ? 'is-today' : ''}" data-date="${d.date}" aria-pressed="${d.date === S.date}" aria-label="${esc(fmtDate(d.date))} ${esc(v.code)} ${esc(v.line)}">
-        <span class="d"><span>${Number(d.date.slice(8))}${d.date.slice(8) === '01' || d.date === r.startDate ? ' ' + MON[Number(d.date.slice(5, 7)) - 1] : ''}</span>${was}</span>
-        <span class="code">${esc(v.code)}</span><span class="sub ${v.mono ? 'mono' : ''}">${esc(v.sub)}</span>${v.sub2 ? `<span class="sub">${esc(v.sub2)}</span>` : ''}
-        ${ch ? tag(ch.type) : ''}</button>`;
-    });
-    // agenda
-    let ag = '', wk = null;
-    r.days.forEach((d) => {
-      const mon = C.addDays(d.date, -((C.dowOf(d.date) + 6) % 7));
-      if (mon !== wk) { if (wk) ag += '</div>'; wk = mon; ag += `<div class="wk"><span class="label">Week of ${fmtDate(mon)}</span>`; }
-      const v = dayView(r, d), ch = diff && diff.days[d.date];
-      ag += `<button class="row k-${v.kind} ${ch ? 'chg chg-' + ch.type : ''} ${d.date === today ? 'is-today' : ''}" data-row="${d.date}" aria-expanded="${S.openRow === d.date}">
-        <span class="dt">${C.DOW_NAMES[C.dowOf(d.date)]}<b>${d.date.slice(8)}</b></span>
-        <span style="min-width:0"><span class="code">${esc(v.code)}</span> ${ch && ch.was && ch.was !== d.code ? `<span class="was muted" style="text-decoration:line-through;font-size:.8rem">${esc(ch.was)}</span>` : ''}<span class="sub" style="display:block">${esc(v.line)}${v.mono ? ` · ${esc(v.sub)}` : ''}</span></span>
+      const m = d.date.slice(0, 7);
+      if (m !== mon) { if (wk) ag += '</div>'; wk = null; mon = m; const [y, mo] = m.split('-').map(Number); ag += `<h3 class="month-h">${MONTH_LONG[mo - 1]} <span>${y}</span></h3>`; }
+      const monday = C.addDays(d.date, -((C.dowOf(d.date) + 6) % 7));
+      if (monday !== wk) { if (wk) ag += '</div>'; wk = monday; ag += `<div class="wk"><span class="label">Week of ${fmtDate(monday)}</span>`; }
+      const v = dayView(r, d), ch = diff && diff.days[d.date], isToday = d.date === today;
+      ag += `<button class="row k-${v.kind} ${ch ? 'chg chg-' + ch.type : ''} ${isToday ? 'is-today' : ''}" data-row="${d.date}" ${isToday ? 'id="today-row"' : ''} aria-expanded="${S.openRow === d.date}">
+        <span class="dt">${C.DOW_NAMES[C.dowOf(d.date)]}<b>${d.date.slice(8)}</b>${isToday ? '<b class="today-tag">Today</b>' : ''}</span>
+        <span style="min-width:0"><span class="code">${esc(v.code)}</span> ${ch && ch.was && ch.was !== d.code ? `<span class="was muted" style="text-decoration:line-through;font-size:.8rem">${esc(ch.was)}</span>` : ''}<span class="sub" style="display:block">${esc(v.line)}${v.sub2 && d.tripIndex == null ? ` · ${esc(v.sub2)}` : ''}</span></span>
         <span>${ch ? tag(ch.type) : ''}</span></button>`;
       if (S.openRow === d.date) ag += `<div class="row-detail">${detail(p, r, diff, d.date, true)}</div>`;
     });
     if (wk) ag += '</div>';
-    html += `<div class="roster-wrap"><div style="min-width:0"><div class="grid-wrap"><div class="grid">${cells}</div>${legend()}</div><div class="agenda">${ag}${legend()}</div></div>
+    html += `<div class="roster-wrap"><div style="min-width:0"><div class="grid-wrap">${grid}${legend()}</div><div class="agenda">${ag}${legend()}</div></div>
       <aside class="detail side">${detail(p, r, diff, S.date)}</aside></div>`;
     return html;
   }
-  const legend = () => `<div class="legend"><span><i class="sw k-trip"></i>Trip</span><span><i class="sw k-standby"></i>Standby (A)</span><span><i class="sw k-rest"></i>Rest day (X)</span><span><i class="sw k-rrr"></i>Rest recovery (R-)</span><span><i class="sw chg"></i>Changed</span></div>`;
+  const MONTH_LONG = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  const legend = () => `<div class="legend">${[['trip', 'Flying'], ['available', 'Available (A)'], ['standby', 'Standby (SR, S/, /S, SS, ES)'], ['off', 'Day off (X, RX)'], ['reserve', 'Reserve block (R-)'], ['leave', 'Leave'], ['fail', 'Failed obligation (UN)']]
+    .map(([k, l]) => `<span><i class="sw k-${k}"></i>${l}</span>`).join('')}<span><i class="sw chg"></i>Changed</span><span><i class="sw today"></i>Today</span></div>`;
 
   function detail(p, r, diff, date, inline) {
     const d = r.days.find((x) => x.date === date); if (!d) return '';
     const v = dayView(r, d), ch = diff && diff.days[date];
     const t = d.tripIndex != null ? r.trips[d.tripIndex] : null;
-    let h = inline ? '' : `<div class="detail-head k-${v.kind}"><span class="code">${esc(v.code)}</span><h3>${esc(fmtDate(date, 'long'))}</h3></div>`;
+    const B = r.base, BO = r.baseOff;
+    let h = inline ? '' : `<div class="detail-head k-${v.kind}"><span class="code">${esc(v.code)}</span><h3>${esc(fmtDate(date, 'long'))}${date === todayIso(BO) ? ' <span class="today-tag">Today</span>' : ''}</h3></div>`;
+    const resLine = d.reserve ? `<p class="note">Reserve block day ${d.reserve.n} of ${d.reserve.of} (${esc(fmtDate(d.reserve.start))} – ${esc(fmtDate(d.reserve.end))}). A days in the block may be converted to standby.</p>` : '';
     if (!t) {
       h += `<p>${esc(v.line || 'No duty')}</p>`;
-      if (d.code === 'R-' && d.rept) h += `<p class="note">Listed ${fc(d.rept)}–${fc(d.end)} in the export; shown as an all-day entry.</p>`;
+      if (d.kind === 'standby' && d.standby) h += `<dl class="kv"><dt>Starts</dt><dd>${when(d.standby.startMs, d.standby.off, d.standby.port, BO, B, true)}</dd><dt>Ends</dt><dd>${when(d.standby.endMs, d.standby.off, d.standby.port, BO, B, true)}</dd></dl><p class="note">Be able to report and be ready to operate within 90 minutes of being contacted.</p>`;
+      if (d.code === 'A') h += '<p class="note">Stay contactable 00:01–23:59. A duty needs at least 8 hours’ notice; Operations aims to call by 21:00 the day before.</p>';
+      if (d.code === 'R-' && d.rept) h += `<p class="note">Listed ${fc(d.rept)}–${fc(d.end)} in WebCIS; shown as an all-day entry.</p>`;
+      if (d.kind === 'other') h += '<p class="note">This code isn’t in the corporate roster code list. It’s synced as an all-day entry.</p>';
+      h += resLine;
       if (ch && ch.was) h += `<p class="note">${tag(ch.type)} Was <b>${esc(ch.was)}</b> in the previous export.</p>`;
       return h;
     }
     const tc = diff && diff.trips.find((c) => c.new === t);
     const changed = (lab) => tc && tc.fields.find((f) => f.label === lab);
-    const val = (lab, now) => { const c = changed(lab); return c ? `<span class="del">${esc(c.from)}</span> <span class="ins">${esc(now)}</span>` : esc(now); };
+    const was = (lab) => { const c = changed(lab); return c ? `<span class="del">${esc(c.from)}</span> ` : ''; };
     const di = t.dayInfo.find((x) => x.date === date);
     h += `<p style="margin:0 0 4px"><b>${esc(t.pattern)}</b> · day ${di.n} of ${di.of} · ${esc(di.label)}</p>`;
     if (tc) h += `<p class="note" style="margin:0 0 6px">${tag(tc.type)} since the previous export${tc.type === 'renamed' ? ` (was ${esc(tc.old.pattern)})` : ''}.</p>`;
-    h += `<dl class="kv"><dt>Trip</dt><dd>${esc(fmtDate(t.startDate))} – ${esc(fmtDate(t.endDate))}</dd><dt>Report</dt><dd>${val('Report', fc(t.rept))} ${esc(r.base)}</dd><dt>Sign-off</dt><dd>${val('Sign-off', fc(t.end))} ${esc(r.base)}</dd><dt>Credit</dt><dd>${val('Credit', t.credit || '—')}</dd>${t.detail ? `<dt>Detail</dt><dd>${esc(t.detail)}</dd>` : ''}</dl>`;
+    h += `<dl class="kv"><dt>Trip</dt><dd>${esc(fmtDate(t.startDate))} – ${esc(fmtDate(t.endDate))}</dd><dt>Credit</dt><dd>${was('Credit')}${esc(t.credit || '—')}</dd>${t.detail ? `<dt>Detail</dt><dd>${esc(t.detail)}</dd>` : ''}</dl>`;
     h += '<div class="secs">' + t.sectors.map((s, i) => {
-      const fl = changed(`Sector ${i + 1} flight`), dep = changed(`${s.flight} departs`), arr = changed(`${s.flight} arrives`);
-      return `<div class="sec"><span><span class="fl">${fl ? `<span class="del">${esc(fl.from)}</span> ` : ''}${esc(s.flight)}</span>${s.positioning ? '<span class="pflag" title="P flag in WebCIS — positioning">P</span>' : ''}</span><span class="rt">${esc(s.from)}→${esc(s.to)}</span>
-        <span class="tm"><span>Dep ${dep ? `<span class="del">${esc(dep.from)}</span> ` : ''}${esc(C.DOW_NAMES[C.dowOf(s.depDate)])} ${fc(s.depLst)} ${esc(s.from)}</span><span>Arr ${arr ? `<span class="del">${esc(arr.from)}</span> ` : ''}${esc(C.DOW_NAMES[C.dowOf(s.arrDate)])} ${fc(s.arrLst)} ${esc(s.to)}</span></span>
-        <span class="yours">Your time (${esc(tzShort)}): ${esc(devFmt.format(s.depMs))} – ${esc(new Date(s.arrMs).toDateString() === new Date(s.depMs).toDateString() ? devTime.format(s.arrMs) : devFmt.format(s.arrMs))}${s.dutyHours ? ` · duty ${esc(s.dutyHours)}` : ''}</span></div>`;
+      const fl = changed(`Sector ${i + 1} flight`);
+      const row = (lab, ms, off, port, chLab) => `<dt>${lab}</dt><dd>${chLab ? was(chLab) : ''}${when(ms, off, port, BO, B, true)}</dd>`;
+      return `<div class="sec ${s.depDate === date || s.arrDate === date ? 'on-day' : ''}"><span><span class="fl">${fl ? `<span class="del">${esc(fl.from)}</span> ` : ''}${esc(s.flight)}</span>${s.positioning ? '<span class="pflag" title="Positioning (paxing)">Positioning</span>' : ''}</span><span class="rt">${esc(s.from)}→${esc(s.to)}</span>
+        <dl class="kv sec-kv">${row('Report', s.reportMs, s.depOff, s.from, `${s.flight} report`)}${row('Departs', s.depMs, s.depOff, s.from, `${s.flight} departs`)}${row('Arrives', s.arrMs, s.arrOff, s.to, `${s.flight} arrives`)}${row('Sign-off', s.signOffMs, s.arrOff, s.to)}
+        ${s.dutyHours ? `<dt>Duty</dt><dd>${esc(s.dutyHours)}</dd>` : ''}</dl>
+        ${s.layoverMin != null ? `<span class="layover">${esc(s.to)} layover ${esc(C.minToHhmm(s.layoverMin))}</span>` : ''}</div>`;
     }).join('') + '</div>';
-    h += '<p class="note">Sector times are local to each airport.</p>';
+    h += resLine;
     return h;
   }
 
@@ -366,6 +436,35 @@
     return html + '</div>';
   }
 
+  function viewPay() {
+    const p = period(); if (!p) return banners() + emptyState();
+    const cfg = allowCfg();
+    const a = C.allowances(p.latest, cfg);
+    const cur = cfg.mealCurrency;
+    const sum = (type) => a.items.filter((x) => x.type === type).reduce((s, x) => s + x.amount, 0);
+    let html = banners() + periodPicker(p, false);
+    html += `<p class="note" style="margin:-4px 0 12px">Gross estimates from the latest export (${esc(fmtExport(p.latest.exportedAt))}), before CPF and tax. Rates come from Settings. Actual pay may differ.</p>`;
+    const tile = (label, val, sub) => `<div class="stat"><span class="label">${label}</span><b>${esc(val)}</b>${sub ? `<span class="muted" style="font-size:.8rem">${esc(sub)}</span>` : ''}</div>`;
+    html += `<div class="stats">${tile('Miscellaneous', money('SGD', sum('misc')))}${tile('Meal', money(cur, sum('meal')), `${a.items.filter((x) => x.type === 'meal').length} layovers`)}${tile('Transport', money('SGD', sum('transport')), `${a.items.filter((x) => x.type === 'transport').length} qualifying sign-ons/offs`)}${
+      a.combinedSGD != null ? tile('Total (SGD)', money('SGD', a.combinedSGD), cur !== 'SGD' && cfg.fx ? `at 1 ${cur} = ${cfg.fx} SGD` : '') : tile('Total', `${money('SGD', a.totals.SGD || 0)} + ${money(cur, a.totals[cur] || 0)}`, `Add the ${cur}→SGD rate in Settings for one total`)}</div>`;
+    const TYPE = { misc: 'Miscellaneous', meal: 'Meal', transport: 'Transport' };
+    html += `<section class="panel"><h3>Itemised · BP ${esc(p.bidPeriod)}</h3><div class="scroll-x"><table class="ptab"><thead><tr><th>Date</th><th>Allowance</th><th>Detail</th><th class="num">Amount</th><th>Paid</th></tr></thead><tbody>${
+      a.items.map((it) => `<tr class="${it.provided ? 'struck' : ''}"><td class="mono">${esc(fmtDate(it.date))}</td><td>${TYPE[it.type]}</td><td><span>${esc(it.desc)}</span><span class="muted basis">${esc(it.basis)}${it.type === 'meal' ? ` · rate ${esc(money(it.currency, it.rate))}/day` : ''}</span>${
+        it.type === 'meal' ? `<label class="mp"><input type="checkbox" data-meal="${esc(it.key)}" ${it.provided ? 'checked' : ''}> Meals provided</label>` : ''}</td><td class="num mono">${esc(money(it.currency, it.amount))}</td><td class="mono">${esc(fmtDate(it.payDate))}</td></tr>`).join('') || '<tr><td colspan="5" class="muted">No allowances in this bid period.</td></tr>'
+    }</tbody></table></div></section>`;
+    // by pay date across loaded bid periods (latest export of each)
+    const byPay = {};
+    S.periods.forEach((x) => C.allowances(x.latest, cfg).items.forEach((it) => {
+      const b = byPay[it.payDate] = byPay[it.payDate] || { SGD: 0, [cur]: 0, months: new Set() };
+      b[it.currency] = (b[it.currency] || 0) + it.amount; b.months.add(it.month);
+    }));
+    const rows = Object.keys(byPay).sort();
+    html += `<section class="panel" style="margin-top:14px"><h3>By pay date</h3><p class="muted" style="font-size:.88rem">Allowances are paid on the 23rd of the month after they're earned.</p><div class="scroll-x"><table class="ptab"><thead><tr><th>Pay date</th><th>Earned in</th><th class="num">SGD</th>${cur !== 'SGD' ? `<th class="num">${esc(cur)}</th>` : ''}${cfg.fx && cur !== 'SGD' ? '<th class="num">Total SGD</th>' : ''}</tr></thead><tbody>${
+      rows.map((d) => { const b = byPay[d]; const [y, m] = [...b.months][0].split('-').map(Number); return `<tr><td class="mono">${esc(fmtDate(d, 'long'))}</td><td>${MON[m - 1]} ${y}</td><td class="num mono">${esc(money('SGD', b.SGD))}</td>${cur !== 'SGD' ? `<td class="num mono">${esc(money(cur, b[cur]))}</td>` : ''}${cfg.fx && cur !== 'SGD' ? `<td class="num mono">${esc(money('SGD', b.SGD + b[cur] * cfg.fx))}</td>` : ''}</tr>`; }).join('')
+    }</tbody></table></div><p class="note">Covers the bid periods in range (Settings). X-Day allowance isn't included: it only applies when you volunteer to work a day off.</p></section>`;
+    return html;
+  }
+
   function banners() {
     let h = '';
     if (PREVIEW) h += `<div class="banner info"><p><b>Preview with the three sample exports.</b> Browse the roster, changes and calendar plan here. Google Drive import and Calendar sync run on your hosted copy of the app.</p></div>`;
@@ -400,7 +499,8 @@
       const plan = S.plan && S.plan.key === key(sp) && S.plan.export === sp.latest.id ? S.plan : null;
       if (PREVIEW || !S.token) {
         const ev = C.eventPlan(sp.latest, { reminderMin: Number(settings.reminder) });
-        html += `<p>${ev.length} calendar entries for this bid period: ${ev.filter((e) => e.start.dateTime).length} flight sectors and ${ev.filter((e) => e.start.date).length} all-day day entries.</p>
+        const nSec = ev.filter((e) => e.colorId === C.COLOR.sector).length, nSb = ev.filter((e) => e.start.dateTime && e.colorId !== C.COLOR.sector).length;
+        html += `<p>${ev.length} calendar entries for this bid period: ${nSec} flight duties (report → sign-off)${nSb ? `, ${nSb} standby duties` : ''} and ${ev.filter((e) => e.start.date).length} all-day day entries.</p>
           ${PREVIEW ? '' : `<div class="actions"><button class="btn primary" data-act="check" ${!settings.clientId ? 'disabled' : ''}>Connect and check calendar</button></div>`}${evList(ev.map((e) => ({ e })))}`;
       } else if (!plan) {
         html += `<div class="actions"><button class="btn primary" data-act="check" ${S.busy ? 'disabled' : ''}>Check what will change</button></div>${S.busy ? `<p class="note">${esc(S.busy)}</p>` : ''}`;
@@ -418,7 +518,8 @@
   function evList(items) {
     if (!items.length) return '';
     const when = (e) => (e.start.dateTime ? devFmt.format(new Date(e.start.dateTime)) : fmtDate(e.start.date) + ' · all day');
-    const kind = (e) => { const c = e.colorId; return c === C.COLOR.sector ? 'sector' : c === C.COLOR.tripDay ? 'trip' : c === C.DAY_CODES.A.colorId ? 'standby' : c === C.DAY_CODES.X.colorId ? 'rest' : c === C.DAY_CODES['R-'].colorId ? 'rrr' : 'other'; };
+    const byColor = Object.fromEntries(Object.entries(C.KIND_COLOR).map(([k, v]) => [v, k]));
+    const kind = (e) => byColor[e.colorId] || 'other';
     const sk = (e) => (e.start.dateTime || e.start.date + 'T00:00') + (e.start.date ? '0' : '1');
     return `<div class="evlist">${items.sort((a, b) => sk(a.e).localeCompare(sk(b.e))).map(({ e, op }) => `<div class="ev ${op ? 'chg-' + op : ''}"><i class="sw k-${kind(e)}"></i><span class="when">${esc(when(e))}</span><span class="t">${esc(e.summary)}</span><span class="op">${op ? TAG_TEXT[op] : ''}</span></div>`).join('')}</div>`;
   }
@@ -427,12 +528,19 @@
     const m = Number(settings.months);
     return banners() + `<div class="panels two"><section class="panel"><h3>Coverage and calendar</h3><div class="form">
       <div class="field"><label class="label" for="set-months">Bid periods to show</label><div class="range-row"><input type="range" id="set-months" min="1" max="12" value="${m}"><span class="mono" id="months-label">${m} month${m > 1 ? 's' : ''}</span></div><p class="hint">Bid periods that started within this many months back, plus all future ones.</p></div>
-      <div class="field"><label class="label" for="set-reminder">Reminder before report time</label><select id="set-reminder">${[['-1', 'No reminder'], ['0', 'At report time'], ['30', '30 minutes'], ['60', '1 hour'], ['90', '1½ hours'], ['120', '2 hours'], ['180', '3 hours']].map(([v, l]) => `<option value="${v}" ${String(settings.reminder) === v ? 'selected' : ''}>${l}</option>`).join('')}</select><p class="hint">Set on the first flight of each trip.</p></div>
+      <div class="field"><label class="label" for="set-reminder">Reminder before report time</label><select id="set-reminder">${[['-1', 'No reminder'], ['0', 'At report time'], ['30', '30 minutes'], ['60', '1 hour'], ['90', '1½ hours'], ['120', '2 hours'], ['180', '3 hours']].map(([v, l]) => `<option value="${v}" ${String(settings.reminder) === v ? 'selected' : ''}>${l}</option>`).join('')}</select><p class="hint">Before each flight's report time and each standby start.</p></div>
       <div class="field"><label class="label" for="set-cal">Calendar name</label><input type="text" id="set-cal" value="${esc(settings.calName)}" autocomplete="off"><p class="hint">A separate calendar the app creates and owns. Your other calendars are never touched.</p></div>
     </div></section>
     <section class="panel"><h3>Google connection</h3><div class="form">
       <div class="field"><label class="label" for="set-client">Google OAuth client ID</label><input type="text" id="set-client" value="${esc(settings.clientId)}" placeholder="1234…apps.googleusercontent.com" autocomplete="off" spellcheck="false" ${PREVIEW ? 'disabled' : ''}><p class="hint">From your free Google Cloud project. See SETUP.md.</p></div>
       <div class="field"><label class="label" for="set-folder">WebCIS folder in Google Drive</label><input type="url" id="set-folder" value="${esc(settings.folder)}" placeholder="https://drive.google.com/drive/folders/…" autocomplete="off" spellcheck="false" ${PREVIEW ? 'disabled' : ''}><p class="hint">Open the folder in Drive and paste its link.</p></div>
+    </div></section>
+    <section class="panel"><h3>Allowance rates</h3><div class="form">
+      <div class="field"><label class="label" for="set-meal">Meal allowance per day</label><div class="range-row"><input type="number" id="set-meal" min="0" step="0.01" value="${esc(settings.mealRate)}" inputmode="decimal" style="flex:1"><input type="text" id="set-mealcur" value="${esc(settings.mealCurrency)}" maxlength="3" style="width:5.5em;text-transform:uppercase" aria-label="Meal allowance currency"></div><p class="hint">The company's daily rate. IRAS sets the upper limit; the company may pay less.</p></div>
+      <div class="field"><label class="label" for="set-ports">Per-port meal rates (optional)</label><input type="text" id="set-ports" value="${esc(settings.portRates)}" placeholder="AKL=55, BNE=48" autocomplete="off" spellcheck="false"><p class="hint">Overrides the daily rate for those ports, in the same currency.</p></div>
+      <div class="field"><label class="label" for="set-fx">1 ${esc(settings.mealCurrency || 'AUD')} in SGD (optional)</label><input type="number" id="set-fx" min="0" step="0.0001" value="${esc(settings.fx)}" placeholder="e.g. 0.86" inputmode="decimal"><p class="hint">Adds a combined SGD total. Leave blank to keep currencies separate.</p></div>
+      <div class="field"><label class="label" for="set-misc">Miscellaneous allowance per bid period (SGD)</label><input type="number" id="set-misc" min="0" step="0.01" value="${esc(settings.miscSGD)}" inputmode="decimal"></div>
+      <div class="field"><label class="label" for="set-transport">Transport allowance per qualifying sign-on/off (SGD)</label><input type="number" id="set-transport" min="0" step="0.01" value="${esc(settings.transportSGD)}" inputmode="decimal"></div>
     </div></section>
     <section class="panel"><h3>Data on this device</h3><p class="muted">${S.files.length} export file${S.files.length === 1 ? '' : 's'} cached in this browser. Nothing is sent anywhere except Google.</p>
       ${S.confirmClear ? `<div class="confirm"><span>Remove all cached exports from this device?</span><button class="btn danger small" data-act="clear-yes">Remove</button><button class="btn small" data-act="clear-no">Cancel</button></div>` : '<div class="actions"><button class="btn danger" data-act="clear">Clear cached exports</button></div>'}
@@ -460,6 +568,14 @@
     if (act === 'drive') ensureToken().then(driveRefresh).then((m) => { render(); toast(m); }).catch(fail);
     if (act === 'check') { const p = syncPeriod(); ensureToken().then(() => checkPlan(p)).catch(fail); }
     if (act === 'apply') ensureToken().then(applyPlan).then(async (n) => { toast(`Calendar updated: ${n} change${n === 1 ? '' : 's'}.`); await checkPlan(syncPeriod()); }).catch(fail);
+    if (act === 'today') {
+      const t = todayIso(); const tp = S.periods.find((x) => t >= x.startDate && t <= x.endDate);
+      if (!tp) { toast(`No loaded bid period covers today (${fmtDate(t)}).`); return; }
+      S.periodKey = key(tp); S.exportIdx = null; S.date = t; S.openRow = t; S.view = 'roster'; render();
+      const el = [document.getElementById('today-cell'), document.getElementById('today-row')].find((x) => x && x.offsetParent !== null);
+      if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      return;
+    }
     if (act === 'clear') { S.confirmClear = true; render(); }
     if (act === 'clear-no') { S.confirmClear = false; render(); }
     if (act === 'clear-yes') { store.clear().then(() => { S.files = S.files.filter((f) => f.source === 'sample'); S.confirmClear = false; rebuild(); render(); toast('Cached exports removed.'); }); }
@@ -478,6 +594,11 @@
     if (el.id === 'set-client') { settings.clientId = el.value.trim(); saveSettings(); if (settings.clientId) loadGis().catch(() => {}); toast('Client ID saved.'); }
     if (el.id === 'set-folder') { settings.folder = el.value.trim(); saveSettings(); toast('Drive folder saved.'); }
     if (el.id === 'pick-files') ingest([...el.files]);
+    const num = { 'set-meal': 'mealRate', 'set-fx': 'fx', 'set-misc': 'miscSGD', 'set-transport': 'transportSGD' }[el.id];
+    if (num) { settings[num] = el.value === '' ? (num === 'fx' ? '' : DEFAULTS[num]) : Number(el.value); saveSettings(); toast('Saved.'); }
+    if (el.id === 'set-mealcur') { settings.mealCurrency = (el.value.trim() || 'AUD').toUpperCase().slice(0, 3); saveSettings(); render(); }
+    if (el.id === 'set-ports') { settings.portRates = el.value.trim(); saveSettings(); toast('Saved.'); }
+    if (el.dataset && el.dataset.meal) { settings.mealsProvided = Object.assign({}, settings.mealsProvided); if (el.checked) settings.mealsProvided[el.dataset.meal] = true; else delete settings.mealsProvided[el.dataset.meal]; saveSettings(); render(); }
   });
   document.addEventListener('input', (ev) => { if (ev.target.id === 'set-months') { const m = ev.target.value; $('#months-label').textContent = `${m} month${m > 1 ? 's' : ''}`; } });
   ['dragenter', 'dragover'].forEach((t) => document.addEventListener(t, (ev) => { if (ev.dataTransfer && [...ev.dataTransfer.types].includes('Files')) { ev.preventDefault(); if (!S.drag) { S.drag = true; const d = $('#drop'); if (d) d.classList.add('over'); } } }));

@@ -8,13 +8,42 @@
   const DOW = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
   const DOW_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-  // Duty codes confirmed by the user. Anything else that has a pattern block is a trip.
+  // Roster codes from the corporate "Rostering & Operational Information" document, §4.1–4.4.
+  // Anything else that has a pattern block is a trip; anything else again is "other" (flagged).
+  // kind = colour/behaviour group. Google Calendar colour ids: 1 Lavender, 2 Sage, 5 Banana,
+  // 6 Tangerine, 7 Peacock, 8 Graphite, 9 Blueberry, 11 Tomato, 3 Grape.
+  const KIND_COLOR = { available: '6', standby: '5', off: '2', reserve: '8', leave: '1', fail: '11', trip: '7', sector: '9', other: '3' };
+  const KIND_LABEL = { trip: 'Flying', available: 'Available', standby: 'Standby', off: 'Day off', reserve: 'Reserve block', leave: 'Leave', fail: 'Failed obligation', other: 'Unrecognised' };
+  const dc = (kind, label, calTitle, extra) => Object.assign({ kind, label, calTitle, colorId: KIND_COLOR[kind] }, extra || {});
   const DAY_CODES = {
-    'A':  { kind: 'standby', label: 'Standby', calTitle: 'Standby (A)', colorId: '6' },
-    'X':  { kind: 'rest',    label: 'Off duty – rest day', calTitle: 'Off duty – rest day', colorId: '2' },
-    'R-': { kind: 'rrr',     label: 'Roster rest recovery', calTitle: 'Roster rest recovery', colorId: '8' },
+    'A':    dc('available', 'Available day', 'Available (A)'),
+    'X':    dc('off', 'Day off', 'Day off (X)'),
+    'RX':   dc('off', 'Redesignated day off', 'Day off (RX)'),
+    'SR':   dc('standby', 'Standby duty', 'Standby (SR)', { times: 'file' }),
+    'S/':   dc('standby', 'Standby duty 04:00–16:00', 'Standby (S/)', { times: ['0400', '1600'] }),
+    '/S':   dc('standby', 'Standby duty 10:00–22:00', 'Standby (/S)', { times: ['1000', '2200'] }),
+    'SS':   dc('standby', 'Standby duty 11:30–23:30', 'Standby (SS)', { times: ['1130', '2330'] }),
+    'R-':   dc('reserve', 'Reserve block', 'Reserve block starts (R-)'),
+    'AL':   dc('leave', 'Annual leave', 'Annual leave (AL)'),
+    'SL':   dc('leave', 'Sick leave', 'Sick leave (SL)'),
+    'US':   dc('leave', 'Unpaid sick leave', 'Unpaid sick leave (US)'),
+    'UL':   dc('leave', 'Upline sickness', 'Upline sickness (UL)'),
+    'CHL':  dc('leave', 'Child care leave', 'Child care leave (CHL)'),
+    'SPL':  dc('leave', 'Shared parental leave', 'Shared parental leave (SPL)'),
+    'DL':   dc('leave', 'Defence leave (NS reservist)', 'Defence leave (DL)'),
+    'LWOP': dc('leave', 'Leave without pay', 'Leave without pay (LWOP)'),
+    'UN':   dc('fail', 'Failed obligation', 'Failed obligation (UN)'),
   };
-  const COLOR = { sector: '9', tripDay: '7', other: '3' };
+  // Upline standby ESxx (§4.4): 12 hours from xx:00 local port time, e.g. ES04 = 04:00–16:00.
+  const codeInfo = (code) => {
+    if (DAY_CODES[code]) return DAY_CODES[code];
+    const es = /^ES(\d{2})$/.exec(code || '');
+    if (es && +es[1] < 24) { const h = +es[1], e = (h + 12) % 24; return dc('standby', `Upline standby ${pad(h)}:00–${pad(e)}:00 local`, `Upline standby (${code})`, { times: [pad(h) + '00', pad(e) + '00'], upline: true }); }
+    return null;
+  };
+  const COLOR = { sector: KIND_COLOR.sector, tripDay: KIND_COLOR.trip, other: KIND_COLOR.other };
+  const RESERVE_BLOCK_DAYS = 7; // §4.1: five A days + two X days
+  const SIGNOFF_AFTER_ARRIVAL = 30; // minutes; observed on every sector of the original export
 
   /* ---------- small helpers ---------- */
   const pad = (n, w = 2) => String(n).padStart(w, '0');
@@ -31,6 +60,9 @@
   // Offset of a port from its Lst/Utc pair, normalised to −12h..+14h.
   const offsetMin = (lst, utc) => { let o = clock(lst) - clock(utc); while (o <= -12 * 60) o += 1440; while (o > 14 * 60) o -= 1440; return o; };
   const toUtcMs = (isoLocalDate, lstHHMM, offMin) => dateObj(isoLocalDate).getTime() + (clock(lstHHMM) - offMin) * 60000;
+  // Clock time / date of an instant at a fixed UTC offset (e.g. SIN +480)
+  const clockAt = (ms, offMin) => new Date(ms + offMin * 60000).toISOString().slice(11, 16);
+  const dateAt = (ms, offMin) => new Date(ms + offMin * 60000).toISOString().slice(0, 10);
 
   function hashStr(str) { // FNV-1a 64-bit → 16 hex chars (valid Google event-id chars)
     let h1 = 0x811c9dc5, h2 = 0xcbf29ce4;
@@ -129,8 +161,12 @@
     r.trips = [];
     let cur = null;
     r.days.forEach((d, idx) => {
-      const known = DAY_CODES[d.code];
-      if (known) { d.kind = known.kind; cur = null; return; }
+      const known = codeInfo(d.code);
+      if (known) {
+        d.kind = known.kind; d.info = known;
+        if (!known.upline) cur = null; // upline standby sits inside a pattern; keep the trip open
+        return;
+      }
       if (!d.code) { d.kind = 'blank'; cur = null; return; }
       const isPattern = !!r.patterns[d.code];
       if (!isPattern) { d.kind = 'other'; cur = null; warnings.push(`Unknown duty code "${d.code}" on ${d.date}.`); return; }
@@ -148,7 +184,40 @@
       resolveSectors(t, r.patterns[t.pattern], r, warnings);
       t.dayInfo = t.days.map((date, i) => ({ date, n: i + 1, of: t.days.length, label: dayLabel(t, date) }));
     });
+    // base (home) UTC offset: from any sector touching base, else SIN +8
+    const anySec = [].concat(...r.trips.map((t) => t.sectors));
+    const bs = anySec.find((s) => s.from === r.base) || anySec.find((s) => s.to === r.base);
+    r.baseOff = bs ? (bs.from === r.base ? bs.depOff : bs.arrOff) : 480;
+
+    // reserve blocks (§4.1): R- marks day 1 of a 7-day block (five A days + two X days)
+    r.days.forEach((d, i) => {
+      if (d.code !== 'R-') return;
+      const n = Math.min(RESERVE_BLOCK_DAYS, r.days.length - i);
+      for (let k = 0; k < n; k++) r.days[i + k].reserve = { start: d.date, end: r.days[i + n - 1].date, n: k + 1, of: n };
+      if (n < RESERVE_BLOCK_DAYS) warnings.push(`Reserve block starting ${d.date} runs past the end of this bid period.`);
+    });
+
+    // standby duties with times (§4.3, §4.4)
+    r.standbys = [];
+    r.days.forEach((d) => {
+      if (d.kind !== 'standby') return;
+      let st, en;
+      if (d.info.times === 'file') { st = d.rept; en = d.end; } else { [st, en] = d.info.times; }
+      if (!st || !en) { d.standby = null; return; }
+      let off = r.baseOff, port = r.base;
+      if (d.info.upline) { // port local time: the port of the last arrival before this day
+        const prior = anySec.filter((s) => s.arrDate <= d.date).sort((a, b) => a.arrMs - b.arrMs).pop();
+        if (prior) { off = prior.arrOff; port = prior.to; } else warnings.push(`Upline standby on ${d.date}: could not tell which port it is at.`);
+      }
+      const startMs = toUtcMs(d.date, st, off); let endMs = toUtcMs(d.date, en, off);
+      if (endMs <= startMs) endMs += 86400000; // crosses midnight
+      d.standby = { startMs, endMs, port, off, st, en };
+      r.standbys.push(Object.assign({ date: d.date, code: d.code }, d.standby));
+      if (endMs - startMs > 16 * 3600000) warnings.push(`Standby ${d.code} on ${d.date} is longer than 16 hours.`);
+    });
+
     r.id = `${r.staffNo}|${r.bidPeriod}|${r.exportedAt}`;
+    r.checks = checkRules(r);
     return r;
   }
 
@@ -169,12 +238,35 @@
       trip.sectors.push(sec);
       cursor = arrDate;
     });
+    // Per-flight sign-off = report + duty hours (from the file). In the original export this always
+    // equals arrival + 30 min; a mismatch means the file is inconsistent, so warn and fall back.
+    trip.sectors.forEach((s, i) => {
+      const viaArr = s.arrMs + SIGNOFF_AFTER_ARRIVAL * 60000;
+      const dh = hhmmToMin(s.dutyHours);
+      s.signOffMs = dh != null ? s.reportMs + dh * 60000 : viaArr;
+      if (dh != null && s.signOffMs !== viaArr) {
+        warnings.push(`${trip.pattern} ${s.flight}: report ${fmtClock(s.report)} + duty ${s.dutyHours} gives a sign-off ${Math.round((s.signOffMs - viaArr) / 60000)} min from arrival + 30. Using arrival + 30 min.`);
+        s.signOffMs = viaArr; s.signOffCheck = false;
+      }
+      if (s.reportMs >= s.depMs) warnings.push(`${trip.pattern} ${s.flight}: report time is not before departure.`);
+    });
+    trip.sectors.forEach((s, i) => {
+      const nx = trip.sectors[i + 1];
+      if (!nx) return;
+      s.layoverMin = Math.round((nx.reportMs - s.signOffMs) / 60000);
+      s.layoverPort = s.to;
+      const slip = hhmmToMin(s.slip);
+      if (slip != null && slip !== s.layoverMin) warnings.push(`${trip.pattern} ${s.to} layover: Slip Time ${s.slip} differs from sign-off → next report ${minToHhmm(s.layoverMin)}.`);
+      if (s.layoverMin <= 0) warnings.push(`${trip.pattern}: ${nx.flight} reports before ${s.flight} signs off.`);
+    });
     const first = trip.sectors[0], last = trip.sectors[trip.sectors.length - 1];
     const baseOff = first.from === r.base ? first.depOff : (last.to === r.base ? last.arrOff : first.depOff);
     trip.baseOff = baseOff;
     trip.reportMs = trip.rept ? toUtcMs(trip.startDate, trip.rept, baseOff) : first.reportMs;
-    trip.signOffMs = trip.end ? toUtcMs(trip.endDate, trip.end, baseOff) : last.arrMs;
+    trip.signOffMs = trip.end ? toUtcMs(trip.endDate, trip.end, baseOff) : last.signOffMs;
     if (trip.signOffMs < last.arrMs) trip.signOffMs += 86400000; // sign-off after midnight
+    if (first.from === r.base && trip.reportMs !== first.reportMs) warnings.push(`${trip.pattern}: roster report ${fmtClock(trip.rept)} differs from ${first.flight} report ${fmtClock(first.report)}.`);
+    if (last.to === r.base && trip.signOffMs !== last.signOffMs) warnings.push(`${trip.pattern}: roster sign-off ${fmtClock(trip.end)} differs from ${last.flight} sign-off.`);
   }
 
   function dayLabel(trip, date) {
@@ -216,12 +308,13 @@
         if (!b) { fields.push({ label: lab, from: sectorSig(a), to: '—' }); continue; }
         if (a.flight !== b.flight) f(`${lab} flight`, a.flight, b.flight);
         if (a.from + a.to !== b.from + b.to) f(`${lab} route`, `${a.from}–${a.to}`, `${b.from}–${b.to}`);
+        if (a.reportMs !== b.reportMs) f(`${b.flight} report`, `${fmtClock(a.report)} ${a.from}`, `${fmtClock(b.report)} ${b.from}`);
         if (a.depMs !== b.depMs) f(`${b.flight} departs`, `${fmtClock(a.depLst)} ${a.from}`, `${fmtClock(b.depLst)} ${b.from}`);
         if (a.arrMs !== b.arrMs) f(`${b.flight} arrives`, `${fmtClock(a.arrLst)} ${a.to}`, `${fmtClock(b.arrLst)} ${b.to}`);
         if (a.positioning !== b.positioning) f(`${b.flight} positioning`, a.positioning ? 'yes' : 'no', b.positioning ? 'yes' : 'no');
       }
       if (fields.length) {
-        const timesOnly = how === 'same' && fields.every((x) => /Report|Sign-off|departs|arrives/.test(x.label));
+        const timesOnly = how === 'same' && fields.every((x) => /report|sign-off|departs|arrives/i.test(x.label));
         out.trips.push({ type: how === 'renamed' ? 'renamed' : (timesOnly ? 'retimed' : 'changed'), old: o, new: n, fields, date: n.startDate });
       }
     });
@@ -281,10 +374,26 @@
       }));
     };
     const allDay = (date) => ({ start: { date }, end: { date: addDays(date, 1) } });
+    const iso = (ms) => new Date(ms).toISOString().replace('.000', '');
+    const bt = (ms) => clockAt(ms, roster.baseOff); // base (SIN) clock time
+    const reserveNote = (d) => (d.reserve ? `Reserve block day ${d.reserve.n}/${d.reserve.of} (${d.reserve.start} → ${d.reserve.end})` : '');
     roster.days.forEach((d) => {
-      const c = DAY_CODES[d.code];
-      if (c) {
-        const desc = [`${c.label}`, d.code === 'R-' && d.rept ? `Listed ${fmtClock(d.rept)}–${fmtClock(d.end)}` : '', `Bid period ${bid} · ${roster.name} (${staff})`].filter(Boolean).join('\n');
+      const c = d.info;
+      if (c && d.kind === 'standby' && d.standby) {
+        const sb = d.standby;
+        const desc = [c.label, `${fmtClock(sb.st)}–${fmtClock(sb.en)} ${sb.port} local`,
+          sb.off !== roster.baseOff ? `${bt(sb.startMs)}–${bt(sb.endMs)} ${roster.base}` : '',
+          'Report ready to operate within 90 min of contact (§4.3).', reserveNote(d), `Bid period ${bid} · ${roster.name} (${staff})`].filter(Boolean).join('\n');
+        const body = { summary: c.calTitle, description: desc, colorId: c.colorId, start: { dateTime: iso(sb.startMs) }, end: { dateTime: iso(sb.endMs) } };
+        if (opts.reminderMin != null && opts.reminderMin >= 0) body.reminders = { useDefault: false, overrides: [{ method: 'popup', minutes: Math.min(40320, opts.reminderMin) }] };
+        mk(`D|${d.date}`, body);
+      } else if (c) {
+        const desc = [c.label,
+          d.code === 'R-' ? `Seven-day reserve block (five A days, two X days): ${d.reserve.start} → ${d.reserve.end}. A days may be converted to standby.` : '',
+          d.code === 'R-' && d.rept ? `Listed ${fmtClock(d.rept)}–${fmtClock(d.end)} in WebCIS` : '',
+          d.code === 'A' ? 'Stay contactable 00:01–23:59; a duty needs at least 8 hours’ notice (§4.2).' : '',
+          d.code !== 'R-' ? reserveNote(d) : '',
+          `Bid period ${bid} · ${roster.name} (${staff})`].filter(Boolean).join('\n');
         mk(`D|${d.date}`, Object.assign({ summary: c.calTitle, description: desc, colorId: c.colorId, transparency: 'transparent' }, allDay(d.date)));
       } else if (d.kind === 'other') {
         mk(`D|${d.date}`, Object.assign({ summary: d.code, description: `Duty code ${d.code} (not recognised)\nBid period ${bid}`, colorId: COLOR.other, transparency: 'transparent' }, allDay(d.date)));
@@ -300,29 +409,151 @@
         }, allDay(di.date)));
       });
       t.sectors.forEach((s, i) => {
-        const lines = [];
-        if (i === 0) lines.push(`Report ${fmtClock(t.rept || s.report)} ${s.from} (local)`);
-        lines.push(`${s.flight} ${s.from}→${s.to}${s.positioning ? ' · positioning (P)' : ''}`,
-          `Departs ${fmtClock(s.depLst)} ${s.from} local · Arrives ${fmtClock(s.arrLst)} ${s.to} local`,
-          s.dutyHours ? `Duty ${s.dutyHours}` : '');
-        if (i === t.sectors.length - 1) lines.push(`Sign-off ${fmtClock(t.end)} ${roster.base} (local)`);
-        lines.push(`Trip ${t.pattern} · sector ${i + 1}/${t.sectors.length} · Bid period ${bid}`);
+        const local = (ms, off, port) => `${clockAt(ms, off)} ${port}` + (off !== roster.baseOff ? ` (${bt(ms)} ${roster.base})` : '');
+        const lines = [
+          `${s.flight} ${s.from}→${s.to}${s.positioning ? ' · positioning (paxing)' : ''}`,
+          `Report   ${local(s.reportMs, s.depOff, s.from)}`,
+          `Departs  ${local(s.depMs, s.depOff, s.from)}`,
+          `Arrives  ${local(s.arrMs, s.arrOff, s.to)}`,
+          `Sign-off ${local(s.signOffMs, s.arrOff, s.to)}`,
+          s.dutyHours ? `Duty ${s.dutyHours}` : '',
+          s.layoverMin != null ? `Layover ${s.to} ${minToHhmm(s.layoverMin)} until next report` : '',
+          'Local times are airport time.',
+          `Trip ${t.pattern} · sector ${i + 1}/${t.sectors.length} · Bid period ${bid}`,
+        ];
         const body = {
           summary: `✈ ${s.flight} ${s.from}–${s.to}${s.positioning ? ' (P)' : ''} · ${t.pattern}`,
           description: lines.filter(Boolean).join('\n'),
           location: `${s.from} → ${s.to}`,
           colorId: COLOR.sector,
-          start: { dateTime: new Date(s.depMs).toISOString().replace('.000', '') },
-          end: { dateTime: new Date(s.arrMs).toISOString().replace('.000', '') },
+          start: { dateTime: iso(s.reportMs) },
+          end: { dateTime: iso(s.signOffMs) },
         };
         if (opts.reminderMin != null && opts.reminderMin >= 0) {
-          const lead = Math.round((s.depMs - s.reportMs) / 60000);
-          body.reminders = { useDefault: false, overrides: i === 0 ? [{ method: 'popup', minutes: Math.min(40320, lead + opts.reminderMin) }] : [] };
+          body.reminders = { useDefault: false, overrides: [{ method: 'popup', minutes: Math.min(40320, opts.reminderMin) }] };
         }
         mk(`S|${t.startDate}|${i}`, body);
       });
     });
     return ev;
+  }
+
+  /* ---------- advisory rule checks (corporate doc §4.5, §4.10, §4.11) ---------- */
+  // Warnings only — they never block a sync. Each check: { id, rule, ok, text, date? }
+  const DUTY_LIMITS = { // planned hours, §4.10
+    multi: { label: 'Multi-sector', max: 18 * 60 },
+    single: { label: 'Single sector', max: 24 * 60 },
+    opDh: { label: 'Operate to deadhead', max: 26 * 60 },
+    dhOp: { label: 'Deadhead to operate', max: 18 * 60 },
+    dh: { label: 'Pure deadhead', max: 26 * 60 },
+  };
+  const minRestFor = (dutyMin, deadhead) => { // §4.11 planned rest at home base
+    if (deadhead) return { min: 12 * 60, band: 'deadhead' };
+    if (dutyMin <= 14 * 60) return { min: 12 * 60, band: 'duty up to 14:00' };
+    if (dutyMin <= 18 * 60) return { min: 16 * 60, band: 'duty 14:01–18:00' };
+    return { min: 22 * 60, band: 'duty over 18:00' };
+  };
+  // A duty = consecutive sectors with no layover (no Slip Time) between them.
+  function dutiesOf(trip) {
+    const out = []; let cur = null;
+    trip.sectors.forEach((s, i) => {
+      if (!cur) { cur = { sectors: [] }; out.push(cur); }
+      cur.sectors.push(s);
+      const last = i === trip.sectors.length - 1;
+      if (last || s.slip || (s.layoverMin != null && s.layoverMin >= 4 * 60)) cur = null;
+    });
+    out.forEach((d) => {
+      const a = d.sectors[0], b = d.sectors[d.sectors.length - 1];
+      d.reportMs = a.reportMs; d.signOffMs = b.signOffMs; d.minutes = Math.round((d.signOffMs - d.reportMs) / 60000);
+      const dh = d.sectors.map((s) => s.positioning);
+      d.type = d.sectors.length === 1 ? (dh[0] ? 'dh' : 'single')
+        : dh.every(Boolean) ? 'dh' : dh.every((x) => !x) ? 'multi' : dh[dh.length - 1] && !dh[0] ? 'opDh' : 'dhOp';
+      d.label = d.sectors.map((s) => s.flight).join('/');
+    });
+    return out;
+  }
+
+  function checkRules(r) {
+    const checks = [];
+    // X days: 16 per 56-day roster period (§4.1, §4.5); scaled for other period lengths.
+    const offDays = r.days.filter((d) => d.code === 'X' || d.code === 'RX').length;
+    const needX = Math.round((16 * r.days.length) / 56);
+    checks.push({ id: 'xdays', rule: 'Days off (§4.5)', ok: offDays >= needX,
+      text: `${offDays} days off (X/RX) in ${r.days.length} days; at least ${needX} expected.` });
+    // Duty limits per duty (§4.10, planned)
+    const over = [];
+    r.trips.forEach((t) => dutiesOf(t).forEach((d) => {
+      const lim = DUTY_LIMITS[d.type];
+      if (d.minutes > lim.max) over.push(`${t.pattern} ${d.label}: ${minToHhmm(d.minutes)} exceeds ${lim.label.toLowerCase()} limit ${minToHhmm(lim.max)}`);
+    }));
+    const nDuties = r.trips.reduce((a, t) => a + dutiesOf(t).length, 0);
+    checks.push({ id: 'duty', rule: 'Duty limits (§4.10)', ok: !over.length, text: over.length ? over.join('; ') + '.' : `All ${nDuties} duties are within planned limits.` });
+    // Home-base minimum rest after a pattern (§4.11): planned duty length = last duty back into base.
+    const starts = [].concat(
+      r.trips.map((t) => ({ ms: t.reportMs, what: `${t.pattern} report` })),
+      r.standbys.map((s) => ({ ms: s.startMs, what: `standby ${s.code}` }))).sort((a, b) => a.ms - b.ms);
+    const short = []; let n = 0;
+    r.trips.forEach((t) => {
+      const last = t.sectors[t.sectors.length - 1]; if (!last || last.to !== r.base) return;
+      const ds = dutiesOf(t), lastDuty = ds[ds.length - 1];
+      const req = minRestFor(lastDuty.minutes, lastDuty.type === 'dh');
+      const next = starts.find((s) => s.ms > t.signOffMs);
+      if (!next) return;
+      n++;
+      const rest = Math.round((next.ms - t.signOffMs) / 60000);
+      if (rest < req.min) short.push(`after ${t.pattern} (${req.band}): ${minToHhmm(rest)} before ${next.what}, ${minToHhmm(req.min)} required`);
+    });
+    checks.push({ id: 'rest', rule: 'Home-base minimum rest (§4.11)', ok: !short.length,
+      text: short.length ? short.join('; ') + '.' : n ? `Rest after all ${n} patterns meets the planned minimum.` : 'No pattern is followed by another duty in this export.' });
+    return checks;
+  }
+
+  /* ---------- allowance estimates (corporate "Pay & Benefits" §2.3–2.5) ---------- */
+  const ALLOWANCE_DEFAULTS = { miscSGD: 50, transportSGD: 25, mealRate: 50, mealCurrency: 'AUD', portRates: {}, fx: null, mealsProvided: {} };
+  const monthOf = (iso) => iso.slice(0, 7);
+  const payDateFor = (month) => { const [y, m] = month.split('-').map(Number); return m === 12 ? `${y + 1}-01-23` : `${y}-${pad(m + 1)}-23`; };
+  // Meal allowance for one layover (§2.4)
+  function mealAmount(minutes, rate) {
+    if (minutes <= 12 * 60) return { amount: rate * 0.5, basis: `up to 12 h → 50% of ${rate}` , hours: null };
+    const hours = Math.ceil(minutes / 60);
+    return { amount: (rate / 24) * hours, basis: `${hours} h (rounded up) × ${rate} ÷ 24`, hours };
+  }
+  function allowances(r, cfg) {
+    cfg = Object.assign({}, ALLOWANCE_DEFAULTS, cfg || {});
+    const items = [];
+    const sinDate = (ms) => dateAt(ms, r.baseOff), sinClock = (ms) => clockAt(ms, r.baseOff);
+    const push = (o) => { o.month = monthOf(o.date); o.payDate = payDateFor(o.month); items.push(o); };
+    // Miscellaneous: flat per bid period with an operating pattern (any non-P flight)
+    const op = r.trips.find((t) => t.sectors.some((s) => !s.positioning));
+    if (op) push({ type: 'misc', key: `misc|${r.bidPeriod}`, date: op.startDate, currency: 'SGD', amount: cfg.miscSGD,
+      desc: `Bid period ${r.bidPeriod} · first operating pattern ${op.pattern}`, basis: 'Flat per bid period' });
+    r.trips.forEach((t) => {
+      // Meal: every layover away from base
+      t.sectors.forEach((s, i) => {
+        if (s.layoverMin == null || s.to === r.base) return;
+        const rate = Number(cfg.portRates[s.to] != null ? cfg.portRates[s.to] : cfg.mealRate) || 0;
+        const k = `meal|${r.staffNo}|${t.startDate}|${i}`;
+        const m = mealAmount(s.layoverMin, rate);
+        const provided = !!cfg.mealsProvided[k];
+        push({ type: 'meal', key: k, date: sinDate(s.signOffMs), currency: cfg.mealCurrency, amount: provided ? 0 : m.amount, full: m.amount, provided,
+          port: s.to, minutes: s.layoverMin, rate, desc: `${t.pattern} · ${s.to} layover ${minToHhmm(s.layoverMin)}`, basis: m.basis });
+      });
+      // Transport: home-base sign-on / sign-off between 23:00 and 06:30 inclusive
+      const inWindow = (hhmm) => { const m = clock(hhmm.replace(':', '')); return m >= 23 * 60 || m <= 6 * 60 + 30; };
+      const first = t.sectors[0], last = t.sectors[t.sectors.length - 1];
+      if (first && first.from === r.base && inWindow(sinClock(t.reportMs)))
+        push({ type: 'transport', key: `tr-on|${t.key}`, date: sinDate(t.reportMs), currency: 'SGD', amount: cfg.transportSGD, desc: `${t.pattern} sign-on ${sinClock(t.reportMs)} ${r.base}`, basis: 'Sign-on 23:00–06:30' });
+      if (last && last.to === r.base && inWindow(sinClock(t.signOffMs)))
+        push({ type: 'transport', key: `tr-off|${t.key}`, date: sinDate(t.signOffMs), currency: 'SGD', amount: cfg.transportSGD, desc: `${t.pattern} sign-off ${sinClock(t.signOffMs)} ${r.base}`, basis: 'Sign-off 23:00–06:30' });
+    });
+    items.sort((a, b) => a.date.localeCompare(b.date) || a.type.localeCompare(b.type));
+    const totals = {};
+    items.forEach((it) => { totals[it.currency] = (totals[it.currency] || 0) + it.amount; });
+    let combinedSGD = null;
+    const fx = Number(cfg.fx);
+    if (Object.keys(totals).every((c) => c === 'SGD')) combinedSGD = totals.SGD || 0;
+    else if (fx > 0 && Object.keys(totals).every((c) => c === 'SGD' || c === cfg.mealCurrency)) combinedSGD = (totals.SGD || 0) + (totals[cfg.mealCurrency] || 0) * fx;
+    return { items, totals, combinedSGD };
   }
 
   // Desired events vs events already in the calendar (only ones this app created).
@@ -340,6 +571,7 @@
     return plan;
   }
 
-  const api = { parseRoster, compareRosters, buildLibrary, eventPlan, syncPlan, DAY_CODES, COLOR, fmtClock, addDays, dowOf, DOW_NAMES, hhmmToMin, minToHhmm, hashStr };
+  const api = { parseRoster, compareRosters, buildLibrary, eventPlan, syncPlan, checkRules, dutiesOf, allowances, mealAmount, payDateFor,
+    DAY_CODES, KIND_COLOR, KIND_LABEL, codeInfo, COLOR, ALLOWANCE_DEFAULTS, fmtClock, clockAt, dateAt, addDays, dowOf, DOW_NAMES, hhmmToMin, minToHhmm, hashStr };
   if (typeof module !== 'undefined' && module.exports) module.exports = api; else root.RosterCore = api;
 })(typeof window !== 'undefined' ? window : globalThis);
